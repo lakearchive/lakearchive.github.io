@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>cunny</title>
+<style>
+* {margin:0;padding:0;}
+
+body {
+	font-family: monospace;
+	background: var(--bg);
+	color: var(--fg);
+	margin: 0;
+	font-size: 1rem;
+	--accent: #63b3ff;
+	--bg: #161616;
+	--fg: #dde1e6;
+	overflow: hidden;
+}
+
+canvas {
+	background:#f8f4f0;
+	display: block;
+	image-rendering: pixelated;
+	width: 100%;
+	height: 100%;
+}
+
+.toolbar {
+	position: fixed;
+	bottom: 1em;
+	left: 1em;
+	padding: 10px;
+	background-color: color-mix(in oklab, var(--bg), white 10%);
+	border-radius: 7px;
+	display: flex;
+	flex-direction: horizontal;
+	gap: 20px;
+	align-items: center;
+}
+
+input[type=file] {opacity:0;position:absolute;width:0;height:0;}
+
+.button {
+	border-radius: 7px;
+	background-color: var(--accent);
+	color: var(--bg);
+	padding: 10px;
+}
+
+.button:hover { cursor: pointer; }
+.button:active { background: color-mix(in oklab, var(--accent), black 10%); scale: 1; }
+
+.toolbar * { min-width: fit-content }
+
+input[type=range] {
+	min-width: 30vw;
+}
+</style>
+</head>
+<body>
+	<div class="toolbar">
+		<input type="file" id="fileInput" accept=".wpls" multiple/>
+		<label for="fileInput" class="button">select file</label>
+		<div>time: <span id="timestamp">go select a file</span></div>
+		<input type="range" id="frameSlider" min="0" max="0" value="0" style="width:100%" />
+	</div>
+	<canvas id="canvas"></canvas>
+<script src="./pako.min.js"></script>
+<script src="./wpls.js"></script>
+<script>
+const canvas = document.getElementById("canvas"),
+	ctx = canvas.getContext("2d"),
+	fileInput = document.getElementById("fileInput"),
+	timestampDisplay = document.getElementById("timestamp"),
+	frameSlider = document.getElementById("frameSlider");
+
+let wplsFiles = [],
+	maxFrames = 0,
+	dx = 0,
+	dy = 0,
+	lastCutoffTs = 0;
+
+const pixelCache = new Map();
+
+fileInput.addEventListener("change", async (e) => {
+	const files = Array.from(e.target.files);
+	wplsFiles = [];
+
+	for (const file of files) {
+		const buf = new Uint8Array(await file.arrayBuffer());
+		const wpls = new WplsFile(buf);
+		wplsFiles.push(wpls);
+	}
+
+	let earliestTs = Infinity, latestTs = -Infinity, minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+
+	for (const file of wplsFiles) {
+		const { baseTimestamp, latestTimestamp, x, y } = file.metadata;
+		if (baseTimestamp < earliestTs) earliestTs = baseTimestamp;
+		if (latestTimestamp > latestTs) latestTs = latestTimestamp;
+		if (x < minx) minx = x;
+		if (x > maxx) maxx = x;
+		if (y < miny) miny = y;
+		if (y > maxy) maxy = y;
+	}
+
+	frameSlider.min = earliestTs;
+	frameSlider.max = latestTs;
+	frameSlider.value = latestTs;
+	dx = minx;
+	dy = miny;
+
+	canvas.width = (maxx - minx + 1) * 1000;
+	canvas.height = (maxy - miny + 1) * 1000;
+
+	timestampDisplay.innerText = formatDate(latestTs * 1000);
+
+	pixelCache.clear();
+
+	renderFrame(latestTs);
+});
+
+frameSlider.addEventListener("input", () => {
+	const timestamp = Number(frameSlider.value);
+	pixelCache.clear();
+	renderFrame(timestamp);
+	timestampDisplay.innerText = formatDate(timestamp * 1000);
+});
+
+let trX = 0,
+	trY = 0,
+	scale = 1,
+	startX, startY,
+	dragging = false;
+
+canvas.addEventListener("mousedown", e => {
+	dragging = true;
+	startX = e.clientX;
+	startY = e.clientY;
+});
+window.addEventListener("mouseup", () => dragging = false);
+window.addEventListener("mousemove", e => {
+	if (!dragging) return;
+	trX += e.clientX - startX;
+	trY += e.clientY - startY;
+	startX = e.clientX;
+	startY = e.clientY;
+	scheduleRender(Number(frameSlider.value));
+});
+
+canvas.addEventListener("wheel", e => {
+	e.preventDefault();
+
+	const rect = canvas.getBoundingClientRect(),
+		mouseX = e.clientX - rect.left,
+		mouseY = e.clientY - rect.top;
+
+	// world coords of cursor BEFORE zoom
+	const worldX = (mouseX - trX) / scale,
+		worldY = (mouseY - trY) / scale;
+
+	const zoomFactor = e.deltaY < 0 ? 1.111 : 1 / 1.111;
+	scale *= zoomFactor;
+
+	// so that worldX/worldY stays under cursor
+	trX = mouseX - worldX * scale;
+	trY = mouseY - worldY * scale;
+
+	scheduleRender(Number(frameSlider.value));
+});
+
+
+let needsRedraw = false;
+function scheduleRender(cutoffTs) {
+	lastCutoffTs = cutoffTs;
+	if (!needsRedraw) {
+		needsRedraw = true;
+		requestAnimationFrame(() => {
+			needsRedraw = false;
+			renderFrame(lastCutoffTs);
+		});
+	}
+}
+
+function renderFrame(cutoffTs) {
+	resizeCanvas();
+
+	ctx.setTransform(1, 0, 0, 1, 0, 0);
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+	ctx.setTransform(scale, 0, 0, scale, trX, trY);
+	ctx.imageSmoothingEnabled = false;
+
+	// compute visible world rect
+	const viewX0 = -trX / scale,
+		viewY0 = -trY / scale,
+		viewX1 = (canvas.width - trX) / scale,
+		viewY1 = (canvas.height - trY) / scale;
+
+	for (const wpls of wplsFiles) {
+		const x = (wpls.metadata.x - dx) * 1000;
+		const y = (wpls.metadata.y - dy) * 1000;
+
+		if (x + 1000 < viewX0 || x > viewX1 || y + 1000 < viewY0 || y > viewY1)
+			continue;
+
+		const k = wpls.metadata.x + "_" + wpls.metadata.y + "_" + cutoffTs;
+		let pixels = pixelCache.get(k);
+		if (!pixels) {
+			pixels = wpls.toPng(cutoffTs);
+			pixelCache.set(k, pixels);
+		}
+		const imageData = new ImageData(new Uint8ClampedArray(pixels), 1000, 1000);
+
+		const off = new OffscreenCanvas(1000, 1000);
+		const offCtx = off.getContext("2d");
+		offCtx.imageSmoothingEnabled = false;
+		offCtx.putImageData(imageData, 0, 0);
+
+		ctx.drawImage(off, x, y);
+	}
+}
+
+function resizeCanvas() {
+	canvas.width = window.innerWidth;
+	canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+
+function formatDate(t) {
+	return new Date(t).toLocaleString(undefined, {
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit"
+	});
+}
+resizeCanvas();
+</script>
+</body>
+</html>
