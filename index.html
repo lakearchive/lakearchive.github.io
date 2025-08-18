@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <title>cunny</title>
 <style>
-* {margin:0;padding:0;}
+* {margin:0;padding:0;outline:none;border:none}
 
 body {
-	font-family: monospace;
+	font-family: sans-serif;
 	background: var(--bg);
 	color: var(--fg);
 	margin: 0;
@@ -46,26 +46,62 @@ input[type=file] {opacity:0;position:absolute;width:0;height:0;}
 	background-color: var(--accent);
 	color: var(--bg);
 	padding: 10px;
+	font-family: sans-serif;
 }
 
 .button:hover { cursor: pointer; }
-.button:active { background: color-mix(in oklab, var(--accent), black 10%); scale: 1; }
+.button:active { background: color-mix(in oklab, var(--accent), black 10%); }
 
 .toolbar * { min-width: fit-content }
+
+.menu {
+	position: fixed;
+	background-color: color-mix(in oklab, var(--bg), white 10%);
+	padding: 10px;
+	border-radius: 7px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.menu > div {
+	background-color: color-mix(in oklab, var(--bg), white 15%);
+	border-radius: 7px;
+	padding: 5px;
+	cursor: pointer;
+}
 
 input[type=range] {
 	min-width: 30vw;
 }
+
+dialog {
+	display: grid;
+	place-self: center;
+	max-width: 33vw;
+	max-height: 50vh;
+}
+
+#timestamp {
+	font-family: monospace;
+}
 </style>
 </head>
 <body>
-	<div class="toolbar">
+	<div id="toolbar" class="toolbar">
 		<input type="file" id="fileInput" accept=".wpls" multiple/>
 		<label for="fileInput" class="button">select file</label>
 		<div>time: <span id="timestamp">go select a file</span></div>
 		<input type="range" id="frameSlider" min="0" max="0" value="0" style="width:100%" />
+		<button class="button" id="menuButton">…</div>
 	</div>
 	<canvas id="canvas"></canvas>
+	<div id="menu" class="menu">
+		<div onmousedown="renderPerfectFrame()">render perfect image</div>
+		<div onmousedown="goToTimestamp()">go to timestamp</div>
+		<div onmousedown="hideUi()">hide ui</div>
+	</div>
+	<dialog id="modal"></dialog>
 <script src="./pako.min.js"></script>
 <script src="./wpls.js"></script>
 <script>
@@ -73,12 +109,18 @@ const canvas = document.getElementById("canvas"),
 	ctx = canvas.getContext("2d"),
 	fileInput = document.getElementById("fileInput"),
 	timestampDisplay = document.getElementById("timestamp"),
-	frameSlider = document.getElementById("frameSlider");
+	frameSlider = document.getElementById("frameSlider"),
+	modal = document.getElementById("modal"),
+	menuButton = document.getElementById("menuButton"),
+	menu = document.getElementById("menu"),
+	toolbar = document.getElementById("toolbar");
 
 let wplsFiles = [],
 	maxFrames = 0,
 	dx = 0,
 	dy = 0,
+	mx = 0,
+	my = 0,
 	lastCutoffTs = 0;
 
 const pixelCache = new Map();
@@ -91,6 +133,7 @@ fileInput.addEventListener("change", async (e) => {
 		const buf = new Uint8Array(await file.arrayBuffer());
 		const wpls = new WplsFile(buf);
 		wplsFiles.push(wpls);
+		console.log(wpls);
 	}
 
 	let earliestTs = Infinity, latestTs = -Infinity, minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
@@ -109,10 +152,9 @@ fileInput.addEventListener("change", async (e) => {
 	frameSlider.max = latestTs;
 	frameSlider.value = latestTs;
 	dx = minx;
+	mx = maxx;
 	dy = miny;
-
-	canvas.width = (maxx - minx + 1) * 1000;
-	canvas.height = (maxy - miny + 1) * 1000;
+	my = maxy;
 
 	timestampDisplay.innerText = formatDate(latestTs * 1000);
 
@@ -121,12 +163,12 @@ fileInput.addEventListener("change", async (e) => {
 	renderFrame(latestTs);
 });
 
-frameSlider.addEventListener("input", () => {
+frameSlider.addEventListener("input", debounce(() => {
 	const timestamp = Number(frameSlider.value);
 	pixelCache.clear();
 	renderFrame(timestamp);
 	timestampDisplay.innerText = formatDate(timestamp * 1000);
-});
+}, 10));
 
 let trX = 0,
 	trY = 0,
@@ -184,8 +226,6 @@ function scheduleRender(cutoffTs) {
 }
 
 function renderFrame(cutoffTs) {
-	resizeCanvas();
-
 	ctx.setTransform(1, 0, 0, 1, 0, 0);
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -219,6 +259,89 @@ function renderFrame(cutoffTs) {
 		offCtx.putImageData(imageData, 0, 0);
 
 		ctx.drawImage(off, x, y);
+	}
+}
+
+function renderPerfectFrame() {
+	const cutoffTs = Number(frameSlider.value),
+		canvas = document.createElement("canvas"),
+		ctx = canvas.getContext("2d");
+	canvas.width = (mx - dx + 1) * 1000;
+	canvas.height = (my - dy + 1) * 1000;
+	for (const wpls of wplsFiles) {
+		const { x, y } = wpls.metadata,
+			k = x + "_" + y + "_" + cutoffTs;
+		let pixels = pixelCache.get(k);
+		if (!pixels) {
+			pixels = wpls.toPng(cutoffTs);
+			pixelCache.set(k, pixels);
+		}
+		console.log(pixels, x, y)
+		ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), 1000, 1000), (x - dx) * 1000, (y - dy) * 1000);
+	}
+	modal.innerHTML = "";
+	modal.appendChild(canvas);
+	modal.showModal();
+}
+
+modal.addEventListener("mousedown", function(e) {
+	if (e.target === e.currentTarget) {
+		// apparently this is also true when clicking on the scrollbar
+		// so a bound check is ineviatable
+		const rect = modal.getBoundingClientRect();
+		if (e.clientX < rect.left ||
+			e.clientX > rect.right ||
+			e.clientY < rect.top ||
+			e.clientY > rect.bottom) modal.close();
+	}
+});
+
+let menuOpened = true,
+	menuHeight = menu.clientHeight,
+	menuWidth = menu.clientWidth;
+function toggleMenu(e) {
+	if (menuOpened) {
+		menu.style.display = "none";
+		menuOpened = false;
+		window.removeEventListener("mousedown", toggleMenu);
+		return;
+	}
+	menu.style.left = e.pageX - menuWidth - 10 + "px";
+	menu.style.top = e.pageY - menuHeight - 10 + "px";
+	menu.style.display = "flex";
+	menuOpened = true;
+	window.addEventListener("mousedown", toggleMenu);
+}
+toggleMenu();
+menuButton.addEventListener("click", toggleMenu);
+
+function goToTimestamp() {
+	const answer = prompt("enter the date in y/m/d h:m:s format"),
+		timestamp = Math.floor(Date.parse(answer)/1000);
+	if (isNaN(timestamp)) return;
+	frameSlider.value = timestamp;
+	timestampDisplay.innerText = formatDate(timestamp * 1000);
+	pixelCache.clear();
+	renderFrame(timestamp);	
+}
+
+function hideUi() {
+	toolbar.style.zIndex = -1;
+	menu.style.zIndex = -1;
+	alert("press any key to show again");
+	function showAgain() {
+		toolbar.style.zIndex = "";
+		menu.style.zIndex = "";
+		window.removeEventListener("keydown", showAgain);
+	}
+	window.addEventListener("keydown", showAgain)
+}
+
+function debounce(fn, delay) {
+	let timer;
+	return (...args) => {
+		clearTimeout(timer);
+		timer = setTimeout(() => fn(...args), delay);
 	}
 }
 
