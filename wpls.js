@@ -207,7 +207,7 @@ class WplsFile {
 		this.metadata.latestTimestamp = latestTs;
 	}
 
-	toPng(cutoffTs = Infinity) {
+	toPng(cutoffTs = Infinity, pixelsToOverride) {
 		const { width, height } = this.metadata;
 		const indices = this.baseIndices.slice();
 
@@ -222,7 +222,7 @@ class WplsFile {
 			}
 		}
 
-		const pixels = new Uint8Array(width * height * 4);
+		const pixels = pixelsToOverride ?? new Uint8ClampedArray(width * height * 4);
 		for (let i = 0; i < indices.length; i++) {
 			const id = indices[i],
 				rgb = PALETTE[id];

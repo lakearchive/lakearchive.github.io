@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cunny</title>
 <style>
 * {margin:0;padding:0;outline:none;border:none}
@@ -123,7 +124,8 @@ let wplsFiles = [],
 	my = 0,
 	lastCutoffTs = 0;
 
-const pixelCache = new Map();
+const pixelCache = new Map(),
+	pixelBuffers = new Map();
 
 fileInput.addEventListener("change", async (e) => {
 	const files = Array.from(e.target.files);
@@ -133,7 +135,6 @@ fileInput.addEventListener("change", async (e) => {
 		const buf = new Uint8Array(await file.arrayBuffer());
 		const wpls = new WplsFile(buf);
 		wplsFiles.push(wpls);
-		console.log(wpls);
 	}
 
 	let earliestTs = Infinity, latestTs = -Infinity, minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
@@ -159,37 +160,46 @@ fileInput.addEventListener("change", async (e) => {
 	timestampDisplay.innerText = formatDate(latestTs * 1000);
 
 	pixelCache.clear();
+	pixelBuffers.clear();
 
 	renderFrame(latestTs);
 });
 
 frameSlider.addEventListener("input", debounce(() => {
 	const timestamp = Number(frameSlider.value);
-	pixelCache.clear();
 	renderFrame(timestamp);
 	timestampDisplay.innerText = formatDate(timestamp * 1000);
 }, 10));
 
 let trX = 0,
 	trY = 0,
-	scale = 1,
-	startX, startY,
-	dragging = false;
+	scale = 1;
 
-canvas.addEventListener("mousedown", e => {
-	dragging = true;
-	startX = e.clientX;
-	startY = e.clientY;
+const pointers = new Map();
+
+canvas.addEventListener("pointerdown", e => {
+	e.preventDefault();
+	canvas.setPointerCapture(e.pointerId);
+	pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 });
-window.addEventListener("mouseup", () => dragging = false);
-window.addEventListener("mousemove", e => {
-	if (!dragging) return;
-	trX += e.clientX - startX;
-	trY += e.clientY - startY;
-	startX = e.clientX;
-	startY = e.clientY;
-	scheduleRender(Number(frameSlider.value));
+
+canvas.addEventListener("pointermove", e => {
+	if (!pointers.has(e.pointerId)) return;
+	const prev = pointers.get(e.pointerId);
+	pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+	if (pointers.size === 1) {
+		const dx = e.clientX - prev.x;
+		const dy = e.clientY - prev.y;
+		trX += dx;
+		trY += dy;
+		scheduleRender(Number(frameSlider.value));
+	}/* else if (pointers.size === 2) {
+		// todo
+	}*/
 });
+
+canvas.addEventListener("pointerup", e => pointers.delete(e.pointerId));
+canvas.addEventListener("pointercancel", e => pointers.delete(e.pointerId));
 
 canvas.addEventListener("wheel", e => {
 	e.preventDefault();
@@ -229,7 +239,7 @@ function renderFrame(cutoffTs) {
 	ctx.setTransform(1, 0, 0, 1, 0, 0);
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-	ctx.setTransform(scale, 0, 0, scale, trX, trY);
+	ctx.setTransform(scale, 0, 0, scale, trX|0, trY|0);
 	ctx.imageSmoothingEnabled = false;
 
 	// compute visible world rect
@@ -245,20 +255,43 @@ function renderFrame(cutoffTs) {
 		if (x + 1000 < viewX0 || x > viewX1 || y + 1000 < viewY0 || y > viewY1)
 			continue;
 
-		const k = wpls.metadata.x + "_" + wpls.metadata.y + "_" + cutoffTs;
-		let pixels = pixelCache.get(k);
-		if (!pixels) {
-			pixels = wpls.toPng(cutoffTs);
-			pixelCache.set(k, pixels);
+		let currentTs = -1;
+		for (const [timestamp] of wpls.deltas) {
+			if (timestamp > cutoffTs) break;
+			currentTs = timestamp;
 		}
-		const imageData = new ImageData(new Uint8ClampedArray(pixels), 1000, 1000);
 
-		const off = new OffscreenCanvas(1000, 1000);
-		const offCtx = off.getContext("2d");
-		offCtx.imageSmoothingEnabled = false;
-		offCtx.putImageData(imageData, 0, 0);
+		const k = wpls.metadata.x + "_" + wpls.metadata.y;
+		let pixels = pixelCache.get(k),
+			buf = pixelBuffers.get(k);
 
-		ctx.drawImage(off, x, y);
+		if (!buf) {
+			buf = new Uint8ClampedArray(1000*1000*4);
+			pixelBuffers.set(k, buf);
+		}
+
+		if (!pixels) {
+			wpls.toPng(currentTs, buf);
+
+			const off = new OffscreenCanvas(1000, 1000),
+				offCtx = off.getContext("2d"),
+				imageData = new ImageData(buf, 1000, 1000);
+			offCtx.imageSmoothingEnabled = false;
+			offCtx.putImageData(imageData, 0, 0);
+			off.timestamp = currentTs;
+			pixels = off;
+			pixelCache.set(k, pixels);
+		} else if (pixels.timestamp !== currentTs) {
+			wpls.toPng(currentTs, buf);
+
+			const offCtx = pixels.getContext("2d"),
+				imageData = new ImageData(buf, 1000, 1000);
+			offCtx.clearRect(0, 0, pixels.width, pixels.height);
+			offCtx.putImageData(imageData, 0, 0);
+			pixels.timestamp = currentTs;
+		}
+
+		ctx.drawImage(pixels, x, y);
 	}
 }
 
@@ -269,15 +302,8 @@ function renderPerfectFrame() {
 	canvas.width = (mx - dx + 1) * 1000;
 	canvas.height = (my - dy + 1) * 1000;
 	for (const wpls of wplsFiles) {
-		const { x, y } = wpls.metadata,
-			k = x + "_" + y + "_" + cutoffTs;
-		let pixels = pixelCache.get(k);
-		if (!pixels) {
-			pixels = wpls.toPng(cutoffTs);
-			pixelCache.set(k, pixels);
-		}
-		console.log(pixels, x, y)
-		ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), 1000, 1000), (x - dx) * 1000, (y - dy) * 1000);
+		const { x, y } = wpls.metadata;
+		ctx.putImageData(new ImageData(wpls.toPng(cutoffTs), 1000, 1000), (x - dx) * 1000, (y - dy) * 1000);
 	}
 	modal.innerHTML = "";
 	modal.appendChild(canvas);
@@ -321,7 +347,6 @@ function goToTimestamp() {
 	if (isNaN(timestamp)) return;
 	frameSlider.value = timestamp;
 	timestampDisplay.innerText = formatDate(timestamp * 1000);
-	pixelCache.clear();
 	renderFrame(timestamp);	
 }
 
