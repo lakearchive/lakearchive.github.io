@@ -99,6 +99,7 @@ dialog {
 	<canvas id="canvas"></canvas>
 	<div id="menu" class="menu">
 		<div onmousedown="renderPerfectFrame()">render perfect image</div>
+		<div onmousedown="resetTransforms()">reset position</div>
 		<div onmousedown="goToTimestamp()">go to timestamp</div>
 		<div onmousedown="hideUi()">hide ui</div>
 	</div>
@@ -249,6 +250,8 @@ function renderFrame(cutoffTs) {
 		viewY1 = (canvas.height - trY) / scale;
 
 	for (const wpls of wplsFiles) {
+		if (wpls.metadata.baseTimestamp > cutoffTs) continue;
+
 		const x = (wpls.metadata.x - dx) * 1000;
 		const y = (wpls.metadata.y - dy) * 1000;
 
@@ -375,6 +378,13 @@ function resizeCanvas() {
 	canvas.height = window.innerHeight;
 }
 window.addEventListener("resize", resizeCanvas);
+
+function resetTransforms() {
+	trX = 0;
+	trY = 0;
+	scale = 1;
+	scheduleRender(Number(frameSlider.value));
+}
 
 function formatDate(t) {
 	return new Date(t).toLocaleString(undefined, {

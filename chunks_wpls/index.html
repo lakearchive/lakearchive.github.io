@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>downloads</title>
 <style>
 * {margin:0;padding:0;outline:none;border:none}
@@ -17,31 +18,6 @@ body {
 	--bg: #161616;
 	--fg: #dde1e6;
 }
-table {
-	width: 100%;
-	background: color-mix(in oklab, var(--bg), white 5%);
-	border-collapse: collapse;
-}
-.table-wrapper {
-	border-radius: 7px;
-	overflow: hidden;
-	border: 1px solid color-mix(in oklab, var(--bg), white 15%);
-	width: fit-content;
-}
-th, td {
-	padding: 0.5rem 1rem;
-	border: 1px solid color-mix(in oklab, var(--bg), white 15%);
-	text-align: left;
-}
-th {
-	background: color-mix(in oklab, var(--bg), white 15%);
-}
-tr:nth-child(even) {
-	background: color-mix(in oklab, var(--bg), white 7.5%);
-}
-tr td:first-child { border-left: none; }
-tr td:last-child { border-right: none; }
-tr:last-child td { border-bottom: none; }
 a {
 	color: var(--accent);
 	text-decoration: none;
@@ -59,40 +35,123 @@ a:hover {
 }
 .button:hover { cursor: pointer; }
 .button:active { background: color-mix(in oklab, var(--accent), black 10%); }
+
+#grid {
+	position: relative;
+}
+.tile {
+	position: absolute;
+	width: 256px;
+	height: 256px;
+	background-size: cover;
+	background-position: center;
+	background-color: #f8f4f0;
+	border: 1px solid color-mix(in oklab, var(--bg), white 15%);
+	cursor: pointer;
+}
+.tile:hover::after {
+	content: attr(data-info);
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	background: color-mix(in oklab, var(--bg), black 30%);
+	color: var(--fg);
+	font-size: 0.8rem;
+	padding: 4px;
+	white-space: pre;
+}
 </style>
 </head>
 <body>
+<div>the archive was last updated <span id="lastModified"></span> ago</div>
 <button class="button" onclick="downloadZip()">download as zip</button>
-<div class="table-wrapper">
-	<table id="fileTable">
-		<tr><th>file</th><th>size</th><th>last modified</th></tr>
-	</table>
-</div>
+<div id="grid"></div>
+
 <script src="/jszip.min.js"></script>
 <script>
 const CHUNKS_DIR = "/chunks_wpls/";
 let files;
-async function loadMeta() {
-	const res = await fetch(CHUNKS_DIR + "index.json");
 
-	files = await res.json();
-
-	const table = document.getElementById("fileTable");
-
-	for (const [name, size, mtime] of files) {
-		const tr = document.createElement("tr"),
-			fileLink = `<a href="${CHUNKS_DIR + name}" download>${name}</a>`;
-		tr.innerHTML = `<td>${fileLink}</td><td>${formatBytes(size)}</td><td>${new Date(mtime).toLocaleString()}</td>`;
-		table.appendChild(tr);
-	}
-}
 function formatBytes(bytes) {
 	const sizes = ["B","KB","MB","GB"];
 	if (bytes === 0) return "0 B";
 	const i = Math.floor(Math.log(bytes) / Math.log(1000));
 	return (bytes / Math.pow(1000, i)).toFixed(2) + " " + sizes[i];
 }
-loadMeta();
+
+function formatDuration(sec) {
+	const units = [
+		["day", 86400],
+		["hour", 3600],
+		["minute", 60],
+		["second", 1]
+	];
+
+	let result = [];
+	for (const [name, value] of units) {
+		if (result.length === 1) {
+			const qty2 = (sec/value).toFixed(+((sec/value) % 1 >= 0.1));
+			result.push(`${qty2} ${name}${qty2 !== 1 ? "s" : ""}`);
+			break;
+		}
+
+		if (sec >= value) {
+			const qty = Math.floor(sec / value);
+			result.push(`${qty} ${name}${qty !== 1 ? "s" : ""}`);
+			sec -= qty * value;
+			if (result.length === 1) continue;
+		}
+	}
+
+	return result.join(", ");;
+}
+
+
+async function loadMeta() {
+	const res = await fetch(CHUNKS_DIR + "index.json");
+	files = await res.json();
+
+	let minX = Infinity,
+		minY = Infinity,
+		maxX = -Infinity,
+		maxY = -Infinity;
+	for (const [,,, x, y] of files) {
+		if (x < minX) minX = x;
+		if (y < minY) minY = y;
+		if (x > maxX) maxX = x;
+		if (y > maxY) maxY = y;
+	}
+
+	const grid = document.getElementById("grid");
+	grid.style.width = (maxX - minX + 1) * 256 + "px";
+	grid.style.height = (maxY - minY + 1) * 256 + "px";
+
+	let maxTs = -Infinity;
+
+	const now = Date.now();;
+
+	for (const [name, size, mtime, x, y] of files) {
+		const div = document.createElement("div"),
+			relativeDuration = formatDuration(Math.floor((now - mtime)/1000));
+		div.className = "tile";
+		div.style.backgroundImage = `url(/thumbnails/${name.replace(/\.wpls$/, ".webp")})`;
+		div.style.left = `${(x - minX) * 256}px`;
+		div.style.top = `${(y - minY) * 256}px`;
+		div.dataset.info = `${name} (${formatBytes(size)})\n${new Date(mtime).toLocaleString()}\n${relativeDuration} ago`;
+		div.onclick = () => {
+			const a = document.createElement("a");
+			a.href = CHUNKS_DIR + name;
+			a.download = name;
+			a.click();
+		};
+		grid.appendChild(div);
+		if (mtime > maxTs) {
+			maxTs = mtime;
+			document.getElementById("lastModified").innerText = relativeDuration;
+		}
+	}
+}
 
 async function downloadZip() {
 	const zip = new JSZip();
@@ -109,6 +168,8 @@ async function downloadZip() {
 	a.click();
 	URL.revokeObjectURL(a.href);
 }
+
+loadMeta();
 </script>
 </body>
 </html>
