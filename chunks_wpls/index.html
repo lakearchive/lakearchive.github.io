@@ -109,7 +109,7 @@ function formatDuration(sec) {
 
 
 async function loadMeta() {
-	const res = await fetch(CHUNKS_DIR + "index.json");
+	const res = await fetch(CHUNKS_DIR + "index.json?ts=" + Date.now());
 	files = await res.json();
 
 	let minX = Infinity,
