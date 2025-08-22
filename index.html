@@ -226,13 +226,14 @@ slider.listeners.push((tsms) => {
 });
 
 document.addEventListener("keydown", e => {
-	e.preventDefault();
 	let delta = 0;
 	if (e.key === "ArrowRight") {
+		e.preventDefault();
 		if (e.ctrlKey) delta = 5;
 		else if (e.shiftKey) delta = 120;
 		else delta = 30;
 	} else if (e.key === "ArrowLeft") {
+		e.preventDefault();
 		if (e.ctrlKey) delta = -5;
 		else if (e.shiftKey) delta = -120;
 		else delta = -30;
