@@ -29,15 +29,16 @@ canvas {
 
 .toolbar {
 	position: fixed;
-	bottom: 1em;
-	left: 1em;
+	bottom: 0;
+	left: 0;
 	padding: 10px;
 	background-color: color-mix(in oklab, var(--bg), white 10%);
-	border-radius: 7px;
 	display: flex;
 	flex-direction: horizontal;
 	gap: 20px;
 	align-items: center;
+	width: calc(100% - 20px);
+	height: 47px;
 }
 
 input[type=file] {opacity:0;position:absolute;width:0;height:0;}
@@ -86,14 +87,59 @@ dialog {
 #timestamp {
 	font-family: monospace;
 }
+
+#slider-container {
+	width: 100%;
+	height: 100%;
+	user-select: none;
+}
+
+.timeline-container {
+	position: relative;
+	height: 100%;
+	overflow: hidden;
+	border-radius: 7px;
+	background-color: color-mix(in oklab, var(--bg), white 20%);
+}
+.timeline-bar {
+	position: absolute;
+	top: 0;
+	height: 100%;
+	white-space: nowrap;
+	border-radius: 7px;
+}
+.mark {
+	--day-color: var(--fg);
+	--hour-color: color-mix(in oklab, var(--fg), black 50%);
+	position: absolute;
+	top: 0;
+	height: 100%;
+	border-left: 2px solid red;
+}
+.mark span {
+	position: absolute;
+	top: 5px;
+	left: 5px;
+	font-size: 12px;
+	color: var(--day-color);
+}
+.pointer {
+	position: absolute;
+	left: 50%;
+	top: 0;
+	bottom: 0;
+	width: 2px;
+	background: var(--accent);
+	transform: translateX(-50%);
+}
 </style>
 </head>
 <body>
 	<div id="toolbar" class="toolbar">
 		<input type="file" id="fileInput" accept=".wpls" multiple/>
 		<label for="fileInput" class="button">select file</label>
-		<div>time: <span id="timestamp">go select a file</span></div>
-		<input type="range" id="frameSlider" min="0" max="0" value="0" style="width:100%" />
+		<span id="timestamp">go select a file</span>
+		<div id="slider-container"></div>
 		<button class="button" id="menuButton">…</div>
 	</div>
 	<canvas id="canvas"></canvas>
@@ -107,12 +153,12 @@ dialog {
 	<dialog id="modal"></dialog>
 <script src="./pako.min.js"></script>
 <script src="./wpls.js"></script>
+<script src="./dateslider.js"></script>
 <script>
 const canvas = document.getElementById("canvas"),
 	ctx = canvas.getContext("2d"),
 	fileInput = document.getElementById("fileInput"),
 	timestampDisplay = document.getElementById("timestamp"),
-	frameSlider = document.getElementById("frameSlider"),
 	modal = document.getElementById("modal"),
 	menuButton = document.getElementById("menuButton"),
 	menu = document.getElementById("menu"),
@@ -125,6 +171,10 @@ let wplsFiles = [],
 	mx = 0,
 	my = 0,
 	lastCutoffTs = 0;
+
+let lastSliderTs = null;
+
+const slider = new DateSlider(document.getElementById("slider-container"), 0, 0);
 
 const pixelCache = new Map(),
 	pixelBuffers = new Map();
@@ -151,9 +201,10 @@ fileInput.addEventListener("change", async (e) => {
 		if (y > maxy) maxy = y;
 	}
 
-	frameSlider.min = earliestTs;
-	frameSlider.max = latestTs;
-	frameSlider.value = latestTs;
+	slider.updateRange(earliestTs * 1000, latestTs * 1000);
+	slider.setTimestamp(latestTs * 1000);
+	lastSliderTs = latestTs;
+
 	dx = minx;
 	mx = maxx;
 	dy = miny;
@@ -167,11 +218,33 @@ fileInput.addEventListener("change", async (e) => {
 	renderFrame(latestTs);
 });
 
-frameSlider.addEventListener("input", debounce(() => {
-	const timestamp = Number(frameSlider.value);
-	renderFrame(timestamp);
-	timestampDisplay.innerText = formatDate(timestamp * 1000);
-}, 10));
+slider.listeners.push((tsms) => {
+	const ts = Math.floor(tsms/1000);
+	lastSliderTs = ts;
+	renderFrame(ts);
+	timestampDisplay.innerText = formatDate(tsms);
+});
+
+document.addEventListener("keydown", e => {
+	e.preventDefault();
+	let delta = 0;
+	if (e.key === "ArrowRight") {
+		if (e.ctrlKey) delta = 5;
+		else if (e.shiftKey) delta = 120;
+		else delta = 30;
+	} else if (e.key === "ArrowLeft") {
+		if (e.ctrlKey) delta = -5;
+		else if (e.shiftKey) delta = -120;
+		else delta = -30;
+	}
+	if (delta !== 0) {
+		lastSliderTs += delta;
+		const tsms = lastSliderTs * 1000;
+		slider.setTimestamp(tsms);
+		renderFrame(lastSliderTs);
+		timestampDisplay.innerText = formatDate(tsms);
+	}
+});
 
 let trX = 0,
 	trY = 0,
@@ -194,7 +267,7 @@ canvas.addEventListener("pointermove", e => {
 		const dy = e.clientY - prev.y;
 		trX += dx;
 		trY += dy;
-		scheduleRender(Number(frameSlider.value));
+		scheduleRender(lastSliderTs);
 	}/* else if (pointers.size === 2) {
 		// todo
 	}*/
@@ -221,7 +294,7 @@ canvas.addEventListener("wheel", e => {
 	trX = mouseX - worldX * scale;
 	trY = mouseY - worldY * scale;
 
-	scheduleRender(Number(frameSlider.value));
+	scheduleRender(lastSliderTs);
 });
 
 
@@ -300,14 +373,13 @@ function renderFrame(cutoffTs) {
 }
 
 function renderPerfectFrame() {
-	const cutoffTs = Number(frameSlider.value),
-		canvas = document.createElement("canvas"),
+	const canvas = document.createElement("canvas"),
 		ctx = canvas.getContext("2d");
 	canvas.width = (mx - dx + 1) * 1000;
 	canvas.height = (my - dy + 1) * 1000;
 	for (const wpls of wplsFiles) {
 		const { x, y } = wpls.metadata;
-		ctx.putImageData(new ImageData(wpls.toPng(cutoffTs), 1000, 1000), (x - dx) * 1000, (y - dy) * 1000);
+		ctx.putImageData(new ImageData(wpls.toPng(lastSliderTs), 1000, 1000), (x - dx) * 1000, (y - dy) * 1000);
 	}
 	modal.innerHTML = "";
 	modal.appendChild(canvas);
@@ -330,6 +402,15 @@ function renderDeltaHeatmap() {
 		const { width, height, x, y } = wpls.metadata,
 			offsetX = (x - dx) * 1000,
 			offsetY = (y - dy) * 1000;
+
+		const base = wpls.baseIndices;
+		for (let i = 0; i < base.length; i++) {
+			if (base[i] < 1) continue;
+			const px = i % width,
+				py = Math.floor(i / width),
+				idx = (offsetY + py) * canvas.width + (offsetX + px);
+			activity[idx] = 1;
+		}
 
 		for (const [, delta] of wpls.deltas) {
 			for (let i = 0; i < delta.length; i++) {
@@ -406,7 +487,7 @@ function goToTimestamp() {
 	const answer = prompt("enter the date in y/m/d h:m:s format"),
 		timestamp = Math.floor(Date.parse(answer)/1000);
 	if (isNaN(timestamp)) return;
-	frameSlider.value = timestamp;
+	slider.setTimestamp(timestamp * 1000);
 	timestampDisplay.innerText = formatDate(timestamp * 1000);
 	renderFrame(timestamp);	
 }
@@ -434,6 +515,7 @@ function debounce(fn, delay) {
 function resizeCanvas() {
 	canvas.width = window.innerWidth;
 	canvas.height = window.innerHeight;
+	scheduleRender(lastSliderTs);
 }
 window.addEventListener("resize", resizeCanvas);
 
@@ -441,7 +523,7 @@ function resetTransforms() {
 	trX = 0;
 	trY = 0;
 	scale = 1;
-	scheduleRender(Number(frameSlider.value));
+	scheduleRender(lastSliderTs);
 }
 
 function formatDate(t) {
